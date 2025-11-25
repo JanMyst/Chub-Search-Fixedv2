@@ -12,12 +12,26 @@ const extensionName = "Work-SillyTavern-Chub-Search";
 const extensionFolderPath = `scripts/extensions/${extensionName}/`;
 
 // Endpoint for API call
-const API_ENDPOINT_SEARCH = "https://api.chub.ai/api/characters/search";
+const API_ENDPOINT_SEARCH = "https://inference.chub.ai/search"; // Use the characters endpoint
+// Or use the generic search endpoint if needed: const API_ENDPOINT_SEARCH = "https://api.chub.ai/api/search";
 const API_ENDPOINT_DOWNLOAD = "https://api.chub.ai/api/characters/download";
 
 const defaultSettings = {
-    findCount: 30,
+    findCount: 30, // Corresponds to 'first'
     nsfw: false,
+    nsfl: false,
+    // Adding new defaults for boolean flags
+    nsfw_only: false,
+    require_images: false,
+    require_example_dialogues: false,
+    require_alternate_greetings: false,
+    require_custom_prompt: false,
+    require_expressions: false,
+    require_lore: false,
+    require_lore_embedded: false,
+    require_lore_linked: false,
+    inclusive_or: false, // Default behavior is usually AND (false) for tags
+    recommended_verified: false,
 };
 
 let chubCharacters = [];
@@ -27,14 +41,14 @@ let savedPopupContent = null;
 
 
 /**
- * Asynchronously loads settings from `extension_settings.chub`, 
+ * Asynchronously loads settings from `extension_settings.chub`,
  * filling in with default settings if some are missing.
- * 
- * After loading the settings, it also updates the UI components 
+ *
+ * After loading the settings, it also updates the UI components
  * with the appropriate values from the loaded settings.
  */
 async function loadSettings() {
-    // Ensure extension_settings.timeline exists
+    // Ensure extension_settings.chub exists
     if (!extension_settings.chub) {
         console.log("Creating extension_settings.chub");
         extension_settings.chub = {};
@@ -47,7 +61,8 @@ async function loadSettings() {
             extension_settings.chub[key] = value;
         }
     }
-
+    // Ensure findCount is a number after loading
+    extension_settings.chub.findCount = Number(extension_settings.chub.findCount) || defaultSettings.findCount;
 }
 
 /**
@@ -65,7 +80,7 @@ async function downloadCharacter(input) {
         headers: getRequestHeaders(),
         body: JSON.stringify({ url }),
     });
-    if (!request.ok) {  
+    if (!request.ok) {
         request = await fetch('/import_custom', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -105,94 +120,197 @@ function updateCharacterListInView(characters) {
     }
 }
 
+// Removed makeTagPermutations as the API likely handles variations.
+
 /**
- * Generates a list of permutations for the given tags. The permutations include:
- * - Original tag.
- * - Tag in uppercase.
- * - Tag with the first letter in uppercase.
- * @param {Array<string>} tags - List of tags for which permutations are to be generated.
- * @returns {Array<string>} - A list containing all the tag permutations.
+ * Builds the query string for the API call based on the provided options.
+ * @param {object} options - The search options object.
+ * @returns {string} - The generated query string part of the URL.
  */
-function makeTagPermutations(tags) {
-    let permutations = [];
-    for (let tag of tags) {
-        if(tag) {
-            permutations.push(tag);
-            permutations.push(tag.toUpperCase());
-            permutations.push(tag[0].toUpperCase() + tag.slice(1));
+function buildQueryString(options) {
+    const params = new URLSearchParams();
+
+    // Map simplified option names to API parameter names
+    const paramMap = {
+        searchTerm: 'search', // Full-text search
+        name_like: 'name_like',
+        first: 'first',
+        min_users_chatted: 'min_users_chatted',
+        includeTags: 'tags',
+        excludeTags: 'exclude_tags',
+        page: 'page',
+        sort: 'sort',
+        asc: 'asc',
+        include_forks: 'include_forks',
+        nsfw: 'nsfw',
+        nsfl: 'nsfl',
+        nsfw_only: 'nsfw_only',
+        require_images: 'require_images',
+        require_example_dialogues: 'require_example_dialogues',
+        require_alternate_greetings: 'require_alternate_greetings',
+        require_custom_prompt: 'require_custom_prompt',
+        max_days_ago: 'max_days_ago',
+        exclude_mine: 'exclude_mine', // Might require auth context
+        only_mine: 'only_mine', // Might require auth context
+        min_tokens: 'min_tokens',
+        max_tokens: 'max_tokens',
+        require_expressions: 'require_expressions',
+        require_lore: 'require_lore',
+        mine_first: 'mine_first', // Might require auth context
+        require_lore_embedded: 'require_lore_embedded',
+        require_lore_linked: 'require_lore_linked',
+        my_favorites: 'my_favorites', // Might require auth context
+        topics: 'topics', // Alternative tag system?
+        excludetopics: 'excludetopics', // Alternative tag system?
+        creator_id: 'creator_id',
+        username: 'username',
+        inclusive_or: 'inclusive_or',
+        recommended_verified: 'recommended_verified',
+        min_tags: 'min_tags',
+        min_ai_rating: 'min_ai_rating',
+        language: 'language',
+        // Skip 'count', 'previous', 'special_mode', 'namespace' for now unless specifically needed
+    };
+
+    for (const [optionKey, value] of Object.entries(options)) {
+        const apiKey = paramMap[optionKey];
+        if (apiKey && (value !== null && value !== undefined && value !== '')) {
+            // Special handling for tags/topics to join array and limit length
+            if ((apiKey === 'tags' || apiKey === 'exclude_tags' || apiKey === 'topics' || apiKey === 'excludetopics') && Array.isArray(value)) {
+                 if (value.length > 0) {
+                     // Join non-empty tags and limit length (adjust limit as needed)
+                     const tagsString = value.filter(tag => tag.length > 0).join(',').slice(0, 500);
+                     if (tagsString) {
+                         params.append(apiKey, tagsString);
+                     }
+                 }
+            }
+            // Handle number inputs that might be empty strings
+            else if (['min_tokens', 'max_tokens', 'min_tags', 'min_users_chatted', 'max_days_ago', 'creator_id', 'min_ai_rating'].includes(apiKey)) {
+                const numValue = parseInt(value, 10);
+                if (!isNaN(numValue)) {
+                     params.append(apiKey, numValue);
+                }
+            }
+             // Handle boolean explicitly to ensure 'false' is sent
+             else if (typeof value === 'boolean') {
+                 params.append(apiKey, value);
+             }
+            // Default handling for other types (strings, numbers derived elsewhere like page/first)
+            else {
+                params.append(apiKey, value);
+            }
         }
     }
-    return permutations;
+
+    // Add venus=true if using the character endpoint? Check API docs. Assume yes for now.
+    // params.append('venus', 'true'); // Might not be needed for /api/characters/search
+
+    return params.toString();
 }
+
 
 /**
  * Fetches characters based on specified search criteria.
- * @param {Object} options - The search options object.
- * @param {string} [options.searchTerm] - A search term to filter characters by name/description.
- * @param {Array<string>} [options.includeTags] - A list of tags that the returned characters should include.
- * @param {Array<string>} [options.excludeTags] - A list of tags that the returned characters should not include.
- * @param {boolean} [options.nsfw] - Whether or not to include NSFW characters. Defaults to the extension settings.
- * @param {string} [options.sort] - The criteria by which to sort the characters. Default is by download count.
- * @param {number} [options.page=1] - The page number for pagination. Defaults to 1.
+ * @param {Object} options - The search options object (using internal names like searchTerm, includeTags, etc.).
  * @returns {Promise<Array>} - Resolves with an array of character objects that match the search criteria.
  */
-async function fetchCharactersBySearch({ searchTerm, includeTags, excludeTags, nsfw, sort, page=1 }) {
+async function fetchCharactersBySearch(options) {
 
-    let first = 30; // вместо extension_settings.chub.findCount
-    let asc = false;
-    let include_forks = true;
-    nsfw = nsfw || extension_settings.chub.nsfw;  // Default to extension settings if not provided
-    let require_images = false;
-    let require_custom_prompt = false;
-    searchTerm = searchTerm ? `search=${encodeURIComponent(searchTerm)}&` : '';
-    sort = sort || 'download_count';
+    // Set defaults from settings if not provided in options
+    options.first = options.first || extension_settings.chub.findCount || 30;
+    options.nsfw = typeof options.nsfw === 'boolean' ? options.nsfw : extension_settings.chub.nsfw;
+    options.nsfl = typeof options.nsfl === 'boolean' ? options.nsfl : extension_settings.chub.nsfl;
+    // Add other boolean defaults from settings
+    options.nsfw_only = typeof options.nsfw_only === 'boolean' ? options.nsfw_only : extension_settings.chub.nsfw_only;
+    options.require_images = typeof options.require_images === 'boolean' ? options.require_images : extension_settings.chub.require_images;
+    options.require_example_dialogues = typeof options.require_example_dialogues === 'boolean' ? options.require_example_dialogues : extension_settings.chub.require_example_dialogues;
+    options.require_alternate_greetings = typeof options.require_alternate_greetings === 'boolean' ? options.require_alternate_greetings : extension_settings.chub.require_alternate_greetings;
+    options.require_custom_prompt = typeof options.require_custom_prompt === 'boolean' ? options.require_custom_prompt : extension_settings.chub.require_custom_prompt;
+    options.require_expressions = typeof options.require_expressions === 'boolean' ? options.require_expressions : extension_settings.chub.require_expressions;
+    options.require_lore = typeof options.require_lore === 'boolean' ? options.require_lore : extension_settings.chub.require_lore;
+    options.require_lore_embedded = typeof options.require_lore_embedded === 'boolean' ? options.require_lore_embedded : extension_settings.chub.require_lore_embedded;
+    options.require_lore_linked = typeof options.require_lore_linked === 'boolean' ? options.require_lore_linked : extension_settings.chub.require_lore_linked;
+    options.inclusive_or = typeof options.inclusive_or === 'boolean' ? options.inclusive_or : extension_settings.chub.inclusive_or;
+    options.recommended_verified = typeof options.recommended_verified === 'boolean' ? options.recommended_verified : extension_settings.chub.recommended_verified;
 
-    // Construct the URL with the search parameters, if any
-    // 
-    let url = `${API_ENDPOINT_SEARCH}?${searchTerm}first=${first}&page=${page}&sort=${sort}&asc=${asc}&venus=true&include_forks=${include_forks}&nsfw=${nsfw}&require_images=${require_images}&require_custom_prompt=${require_custom_prompt}`;
+    // Sensible defaults for non-setting options if not provided
+    options.sort = options.sort || 'download_count';
+    options.page = options.page || 1;
+    options.asc = typeof options.asc === 'boolean' ? options.asc : false; // Default sort descending
+    options.include_forks = typeof options.include_forks === 'boolean' ? options.include_forks : true; // Default include forks
 
-    //truncate include and exclude tags to 100 characters
-    includeTags = includeTags.filter(tag => tag.length > 0);
-    if (includeTags && includeTags.length > 0) {
-        //includeTags = makeTagPermutations(includeTags);
-        includeTags = includeTags.join(',').slice(0, 100);
-        url += `&tags=${encodeURIComponent(includeTags)}`;
-    }
-    //remove tags that contain no characters
-    excludeTags = excludeTags.filter(tag => tag.length > 0);
-    if (excludeTags && excludeTags.length > 0) {
-        //excludeTags = makeTagPermutations(excludeTags);
-        excludeTags = excludeTags.join(',').slice(0, 100);
-        url += `&exclude_tags=${encodeURIComponent(excludeTags)}`;
-    }
 
-    let searchResponse = await fetch(url);
+    // Construct the URL with the search parameters
+    const queryString = buildQueryString(options);
+    const url = `${API_ENDPOINT_SEARCH}?${queryString}`;
+    console.log("Fetching CHub:", url); // Log the final URL for debugging
 
-    let searchData = await searchResponse.json();
+    try {
+        const searchResponse = await fetch(url);
 
-    // Clear previous search results
-    chubCharacters = [];
+        if (!searchResponse.ok) {
+            console.error('CHub API request failed:', searchResponse.status, searchResponse.statusText);
+            try {
+                const errorData = await searchResponse.json();
+                console.error('API Error Details:', errorData);
+                toastr.error(`CHub search failed: ${errorData.message || searchResponse.statusText}`, "API Error");
+            } catch (e) {
+                toastr.error(`CHub search failed: ${searchResponse.statusText}`, "API Error");
+            }
+            return []; // Return empty array on failure
+        }
 
-    if (searchData.nodes.length === 0) {
-        return chubCharacters;
-    }
-    let charactersPromises = searchData.nodes.map(node => getCharacter(node.fullPath));
-    let characterBlobs = await Promise.all(charactersPromises);
+        const searchData = await searchResponse.json();
 
-    characterBlobs.forEach((character, i) => {
-        let imageUrl = URL.createObjectURL(character);
-        chubCharacters.push({
-            url: imageUrl,
-            description: searchData.nodes[i].tagline || "Description here...",
-            name: searchData.nodes[i].name,
-            fullPath: searchData.nodes[i].fullPath,
-            tags: searchData.nodes[i].topics,
-            author: searchData.nodes[i].fullPath.split('/')[0],
+        // Clear previous search results
+        chubCharacters = [];
+
+        // The API structure might be { data: { nodes: [...] } } or just { nodes: [...] }
+        // Adapt based on actual API response. Assuming /api/characters/search returns { nodes: [...] }
+        const nodes = searchData.nodes || (searchData.data ? searchData.data.nodes : null);
+
+        if (!nodes || nodes.length === 0) {
+            return chubCharacters; // Return empty if no nodes found
+        }
+
+        // Fetching individual character *avatars* seems inefficient here.
+        // The search result 'nodes' should contain basic info including avatar URL.
+        // Let's adapt to use the info directly from the search result.
+        // Check the actual API response structure for avatar URLs. Common names: 'avatar_url', 'avatar', 'image_url'
+
+        chubCharacters = nodes.map(node => {
+            // Determine the avatar URL - *adjust based on actual API response field names*
+            // Common possibilities: node.avatar_url, node.avatar, node.definition.avatar etc.
+            // Using a placeholder - **YOU MUST CHECK THE ACTUAL API RESPONSE**
+            let imageUrl = node.avatar_url || node.avatar || `${extensionFolderPath}placeholder.png`; // Provide a fallback placeholder
+             // Ensure the URL is absolute if it's relative
+             if (imageUrl && !imageUrl.startsWith('http') && !imageUrl.startsWith('blob:')) {
+                 // Assuming it might be relative to chub.ai if not absolute
+                 // imageUrl = `https://chub.ai${imageUrl}`; // Uncomment or adjust if needed
+             }
+
+
+            return {
+                // Use the image URL directly from search results if available
+                url: imageUrl,
+                description: node.tagline || "No description.",
+                name: node.name || "Unnamed Character",
+                fullPath: node.fullPath, // Essential for download links
+                tags: node.topics || [], // Assuming 'topics' holds the tags
+                author: node.fullPath ? node.fullPath.split('/')[0] : "Unknown Author", // Extract author from fullPath
+            };
         });
-    });
 
-    return chubCharacters;
+        return chubCharacters;
+
+    } catch (error) {
+        console.error("Error during CHub search fetch:", error);
+        toastr.error("An error occurred while searching CHub.", "Fetch Error");
+        return []; // Return empty array on exception
+    }
 }
+
 
 /**
  * Searches for characters based on the provided options and manages the UI during the search.
@@ -208,7 +326,7 @@ async function searchCharacters(options) {
     if (characterListContainer) {
         characterListContainer.classList.add('searching');
     }
-    console.log('Searching for characters', options);
+    console.log('Searching for characters with options:', options);
     const characters = await fetchCharactersBySearch(options);
     if (characterListContainer) {
         characterListContainer.classList.remove('searching');
@@ -237,11 +355,13 @@ async function executeCharacterSearch(options) {
     let characters  = await searchCharacters(options);
 
     if (characters && characters.length > 0) {
-        console.log('Updating character list');
+        console.log(`Found ${characters.length} characters. Updating character list.`);
         updateCharacterListInView(characters);
     } else {
         console.log('No characters found');
-        characterListContainer.innerHTML = '<div class="no-characters-found">No characters found</div>';
+        if (characterListContainer) { // Ensure container exists before modifying
+             characterListContainer.innerHTML = '<div class="chub-no-characters-found">No characters found for the specified criteria.</div>';
+        }
     }
 }
 
@@ -253,19 +373,22 @@ async function executeCharacterSearch(options) {
  * @returns {string} - Returns an HTML string representation of the character list item.
  */
 function generateCharacterListItem(character, index) {
+    // Use a placeholder if the image URL is invalid or missing
+    const imageUrl = character.url && character.url !== `${extensionFolderPath}placeholder.png` ? character.url : `${extensionFolderPath}placeholder.png`;
+    const placeholderImg = `${extensionFolderPath}placeholder.png`; // Define placeholder path
+
     return `
-        <div class="character-list-item" data-index="${index}">
-            <img class="thumbnail" src="${character.url}">
-            <div class="info">
-                
-                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank"><div class="name">${character.name || "Default Name"}</a>
-                <a href="https://chub.ai/users/${character.author}" target="_blank">
-                 <span class="author">by ${character.author}</span>
-                </a></div>
-                <div class="description">${character.description}</div>
-                <div class="tags">${character.tags.slice(0, 8).map(tag => `<span class="tag">${tag}</span>`).join('')}</div>
+        <div class="character-list-item chub-character-item" data-index="${index}">
+            <img class="thumbnail chub-thumbnail" src="${imageUrl}" onerror="this.onerror=null; this.src='${placeholderImg}';">
+            <div class="info chub-info">
+                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank" title="View on Chub.ai: ${character.name}"><div class="name chub-name">${character.name || "Default Name"}</div></a>
+                <a href="https://chub.ai/users/${character.author}" target="_blank" title="View author on Chub.ai: ${character.author}">
+                 <span class="author chub-author">by ${character.author}</span>
+                </a>
+                <div class="description chub-description">${character.description}</div>
+                <div class="tags chub-tags">${character.tags.slice(0, 8).map(tag => `<span class="tag chub-tag">${tag}</span>`).join('')}</div>
             </div>
-            <div data-path="${character.fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix"></div>
+            <div data-path="${character.fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix chub-download-btn" title="Import Character"></div>
         </div>
     `;
 }
@@ -276,281 +399,516 @@ function clamp(value, min, max) {
 }
 
 /**
- * Displays a popup for character listings based on certain criteria. The popup provides a UI for 
- * character search, and presents the characters in a list view. Users can search characters by 
- * inputting search terms, including/excluding certain tags, sorting by various options, and opting 
- * for NSFW content. The function also offers image enlargement on click and handles character downloads.
- * 
- * If the popup content was previously generated and saved, it reuses that content. Otherwise, it creates 
- * a new layout using the given state or a default layout structure. 
- * 
- * This function manages multiple event listeners for user interactions such as searching, navigating 
- * between pages, and viewing larger character images.
- * 
+ * Creates the HTML layout string for the search popup.
+ * @returns {string} - The HTML string for the popup content.
+ */
+function createPopupLayout() {
+     const readableSortOptions = {
+        "download_count": "Downloads",
+        "last_activity_at": "Last Activity",
+        "rating": "Rating",
+        "created_at": "Creation Date",
+        "name": "Name",
+        "n_tokens": "Tokens",
+        "trending_downloads": "Trending",
+        "id": "ID (Newest)", // Assuming higher ID is newer
+        "rating_count": "Rating Count",
+        "random": "Random"
+        // Add other relevant sort options from API docs if needed
+    };
+
+    // Load current settings to pre-fill checkboxes etc. Use defaults if settings not loaded yet.
+    const currentSettings = extension_settings.chub || defaultSettings;
+
+    // Helper to create checkbox HTML
+    const createCheckbox = (id, label, checked = false, title = '') => `
+        <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+            <label for="${id}" title="${title}">${label}:</label>
+            <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>
+        </div>`;
+
+    // Helper to create number input HTML
+    const createNumberInput = (id, label, placeholder = '', value = '', min = null, title = '') => `
+        <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+            <label for="${id}" title="${title}">${label}:</label>
+            <input type="number" id="${id}" class="text_pole textarea_compact wide100pMinFit" placeholder="${placeholder}" value="${value}" ${min !== null ? `min="${min}"` : ''}>
+        </div>`;
+
+     // Helper to create text input HTML
+     const createTextInput = (id, label, placeholder = '', value = '', title = '') => `
+         <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+             <label for="${id}" title="${title}">${label}:</label>
+             <input type="text" id="${id}" class="text_pole flex1" placeholder="${placeholder}" value="${value}">
+         </div>`;
+
+    return `
+<div class="list-and-search-wrapper chub-wrapper" id="list-and-search-wrapper">
+    <div class="character-list-popup chub-list-popup">
+        ${chubCharacters.map((character, index) => generateCharacterListItem(character, index)).join('')}
+        <!-- Placeholder message when list is empty -->
+        ${chubCharacters.length === 0 ? '<div class="chub-no-characters-found">Perform a search to see characters.</div>' : ''}
+    </div>
+    <hr class="chub-hr">
+    <div class="search-container chub-search-container">
+        <div class="chub-search-row">
+             ${createTextInput('characterSearchInput', '<i class="fas fa-search"></i>', 'Full-text search...', '', 'Search name, description, tags etc.')}
+        </div>
+        <div class="chub-search-row">
+            ${createTextInput('nameLikeInput', '<i class="fas fa-user"></i>', 'Name contains...', '', 'Search only character names')}
+        </div>
+        <div class="chub-search-row">
+            ${createTextInput('includeTags', '<i class="fas fa-plus-square"></i>', 'Include tags (comma separated)', '', 'Tags the character MUST have')}
+             ${createCheckbox('inclusiveOrCheckbox', 'OR', currentSettings.inclusive_or, 'If checked, match ANY included tag (OR). If unchecked, match ALL (AND).')}
+        </div>
+        <div class="chub-search-row">
+             ${createTextInput('excludeTags', '<i class="fas fa-minus-square"></i>', 'Exclude tags (comma separated)', '', 'Tags the character must NOT have')}
+        </div>
+
+        <details class="chub-details">
+            <summary class="chub-summary">Filters & Requirements</summary>
+            <div class="chub-filter-grid">
+                ${createNumberInput('minTokensInput', 'Min Tokens', 'e.g., 100', '', 0, 'Minimum character definition tokens')}
+                ${createNumberInput('maxTokensInput', 'Max Tokens', 'e.g., 4000', '', 0, 'Maximum character definition tokens')}
+                ${createNumberInput('minTagsInput', 'Min Tags', 'e.g., 3', '', 0, 'Minimum number of tags')}
+                ${createNumberInput('minUsersChattedInput', 'Min Chats', 'e.g., 10', '', 0, 'Minimum users chatted count')}
+                ${createNumberInput('maxDaysAgoInput', 'Max Days Ago', 'e.g., 30', '', 0, 'Maximum age of character (in days)')}
+                 ${createNumberInput('minAiRatingInput', 'Min AI Rating', 'e.g., 70', '', 0, 'Minimum AI Content Rating (0-100)')}
+
+                ${createCheckbox('nsfwCheckbox', 'NSFW', currentSettings.nsfw, 'Include Not Safe For Work content')}
+                ${createCheckbox('nsflCheckbox', 'NSFL', currentSettings.nsfl, 'Include Not Safe For Life content (Gore, etc.)')}
+                ${createCheckbox('nsfwOnlyCheckbox', 'NSFW Only', currentSettings.nsfw_only, 'ONLY include NSFW content')}
+                ${createCheckbox('requireImagesCheckbox', 'Need Images', currentSettings.require_images, 'Require characters to have gallery images')}
+                ${createCheckbox('requireExampleDialoguesCheckbox', 'Need Examples', currentSettings.require_example_dialogues, 'Require characters to have example dialogues')}
+                ${createCheckbox('requireAltGreetingsCheckbox', 'Need Greetings', currentSettings.require_alternate_greetings, 'Require characters to have alternate greetings')}
+                ${createCheckbox('requireCustomPromptCheckbox', 'Need Prompt', currentSettings.require_custom_prompt, 'Require characters to have a custom main/NSFW prompt')}
+                ${createCheckbox('requireExpressionsCheckbox', 'Need Expressions', currentSettings.require_expressions, 'Require characters to have an expression pack')}
+                ${createCheckbox('requireLoreCheckbox', 'Need Lore', currentSettings.require_lore, 'Require characters to have any lorebook (linked or embedded)')}
+                ${createCheckbox('requireLoreEmbeddedCheckbox', 'Need Emb. Lore', currentSettings.require_lore_embedded, 'Require characters to have an embedded lorebook')}
+                ${createCheckbox('requireLoreLinkedCheckbox', 'Need Link. Lore', currentSettings.require_lore_linked, 'Require characters to have a linked lorebook')}
+                ${createCheckbox('recommendedVerifiedCheckbox', 'Rec. & Verified', currentSettings.recommended_verified, 'Only show Recommended or Verified characters')}
+                ${createCheckbox('includeForksCheckbox', 'Include Forks', true, 'Include forked versions of characters (uncheck for originals only)')}
+                 ${createTextInput('languageInput', 'Language', 'e.g., en, ja', '', 'Filter by language code (ISO 639-1)')}
+                </div>
+        </details>
+         <details class="chub-details">
+             <summary class="chub-summary">Sorting & Pagination</summary>
+             <div class="chub-filter-grid">
+                <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+                    <label for="sortOrder">Sort By:</label>
+                    <select class="margin0" id="sortOrder">
+                        ${Object.entries(readableSortOptions).map(([key, value]) => `<option value="${key}">${value}</option>`).join('')}
+                    </select>
+                </div>
+                 <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+                    <label for="sortAscCheckbox">Ascending:</label>
+                    <input type="checkbox" id="sortAscCheckbox">
+                </div>
+                 <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+                    <label for="resultsPerPage">Per Page:</label>
+                    <input type="number" id="resultsPerPage" class="text_pole textarea_compact wide8pMinFit" min="1" max="100" value="${currentSettings.findCount || 30}">
+                 </div>
+                <div class="page-buttons flex-container flex-no-wrap flex-align-center chub-filter-item">
+                    <button class="menu_button" id="pageDownButton" title="Previous Page"><i class="fas fa-chevron-left"></i></button>
+                    <label for="pageNumber">Page:</label>
+                    <input type="number" id="pageNumber" class="text_pole textarea_compact wide8pMinFit" min="1" value="1">
+                    <button class="menu_button" id="pageUpButton" title="Next Page"><i class="fas fa-chevron-right"></i></button>
+                </div>
+            </div>
+        </details>
+
+        <div class="menu_button chub-search-button" id="characterSearchButton"><i class="fas fa-search"></i> Search</div>
+    </div>
+</div>
+`;
+}
+
+
+/**
+ * Displays a popup for character listings based on certain criteria.
+ * Handles popup creation, event listeners for search, pagination, image zoom, and download.
+ *
  * @async
  * @function
  * @returns {Promise<void>} - Resolves when the popup is displayed and fully initialized.
  */
 async function displayCharactersInListViewPopup() {
-    if (savedPopupContent) {
-        console.log('Using saved popup content');
-        // Append the saved content to the popup container
-        callPopup('', "text", '', { okButton: "Close", wide: true, large: true })
+    // Regenerate layout each time to reflect potential setting changes
+    // If performance becomes an issue, optimize later, but this ensures freshness.
+    savedPopupContent = null; // Force regeneration
+    const listLayout = createPopupLayout();
+
+    // Call the popup with our list layout
+    // Use a unique ID for the popup content if needed elsewhere
+    callPopup(listLayout, "text", '', { okButton: "Close", wide: true, large: true, popupId: "chub-search-popup" })
         .then(() => {
-            savedPopupContent = document.querySelector('.list-and-search-wrapper');
+            // Optional: clean up if needed when closed
+            savedPopupContent = null; // Clear saved state on close
+            characterListContainer = null; // Clear container reference
         });
 
-        document.getElementById('dialogue_popup_text').appendChild(savedPopupContent);
-        characterListContainer = document.querySelector('.character-list-popup');
+    // Need to wait briefly for the popup to be added to the DOM
+    await delay(100); // Adjust delay if necessary
+
+    characterListContainer = document.querySelector('.chub-list-popup');
+    if (!characterListContainer) {
+        console.error("Could not find character list container in popup!");
         return;
     }
 
-    const readableOptions = {
-        "download_count": "Download Count",
-        "id": "ID",
-        "rating": "Rating",
-        "default": "Default",
-        "rating_count": "Rating Count",
-        "last_activity_at": "Last Activity",
-        "trending_downloads": "Trending Downloads",
-        "created_at": "Creation Date",
-        "name": "Name",
-        "n_tokens": "Token Count",
-        "random": "Random"
-    };
-
-    // TODO: This should be a template
-    const listLayout = popupState ? popupState : `
-<div class="list-and-search-wrapper" id="list-and-search-wrapper">
-    <div class="character-list-popup">
-        ${chubCharacters.map((character, index) => generateCharacterListItem(character, index)).join('')}
-    </div>
-    <hr>
-    <div class="search-container">
-        <div class="flex-container flex-no-wrap flex-align-center">
-            <label for="characterSearchInput"><i class="fas fa-search"></i></label>
-            <input type="text" id="characterSearchInput" class="text_pole flex1" placeholder="Search CHUB for characters...">
-        </div>
-        <div class="flex-container flex-no-wrap flex-align-center">
-            <label for="includeTags"><i class="fas fa-plus-square"></i></label>
-            <input type="text" id="includeTags" class="text_pole flex1" placeholder="Include tags (comma separated)">
-        </div>
-        <div class="flex-container">
-            <label for="excludeTags"><i class="fas fa-minus-square"></i></label>
-            <input type="text" id="excludeTags" class="text_pole flex1" placeholder="Exclude tags (comma separated)">
-        </div>
-        <div class="page-buttons flex-container flex-no-wrap flex-align-center">
-            <button class="menu_button" id="pageDownButton"><i class="fas fa-chevron-left"></i></button>
-            <label for="pageNumber">Page:</label>
-            <input type="number" id="pageNumber" class="text_pole textarea_compact wide8pMinFit" min="1" value="1">
-            <button class="menu_button" id="pageUpButton"><i class="fas fa-chevron-right"></i></button>
-        </div>
-        <div class="flex-container flex-no-wrap flex-align-center">
-            <label for="sortOrder">Sort By:</label>
-            <select class="margin0" id="sortOrder">
-                ${Object.keys(readableOptions).map(key => `<option value="${key}">${readableOptions[key]}</option>`).join('')}
-            </select>
-        </div>
-        <div class="flex-container flex-no-wrap flex-align-center">
-            <label for="nsfwCheckbox">NSFW:</label>
-            <input type="checkbox" id="nsfwCheckbox">
-        </div>
-        <div class="menu_button" id="characterSearchButton">Search</div>
-    
-    </div>
-</div>
-`;
-    // Call the popup with our list layout
-    callPopup(listLayout, "text", '', { okButton: "Close", wide: true, large: true })
-        .then(() => {
-            savedPopupContent = document.querySelector('.list-and-search-wrapper');
-        });
-
-    characterListContainer = document.querySelector('.character-list-popup');   
-
     let clone = null;  // Store reference to the cloned image
 
+    // Image zoom listener
+     // Use event delegation on the container
     characterListContainer.addEventListener('click', function (event) {
-        if (event.target.tagName === 'IMG') {
+        if (event.target.tagName === 'IMG' && event.target.classList.contains('chub-thumbnail')) {
             const image = event.target;
 
-            if (clone) {  // If clone exists, remove it
-                document.body.removeChild(clone);
+             // If the same image is clicked again while zoomed, remove clone
+            if (clone && clone.src === image.src) {
+                if (document.body.contains(clone)) {
+                     document.body.removeChild(clone);
+                }
                 clone = null;
-                return;  // Exit the function
+                return;
             }
+            // If a different image is clicked or no clone exists, create/replace clone
+            else if (clone && document.body.contains(clone)) {
+                 document.body.removeChild(clone); // Remove previous clone first
+                 clone = null;
+            }
+
 
             const rect = image.getBoundingClientRect();
 
             clone = image.cloneNode(true);
-            clone.style.position = 'absolute';
-            clone.style.top = `${rect.top + window.scrollY}px`;
-            clone.style.left = `${rect.left + window.scrollX}px`;
-            clone.style.transform = 'scale(4)';  // Enlarge by 4 times
-            clone.style.zIndex = 99999;  // High value to ensure it's above other elements
+            clone.style.position = 'fixed'; // Use fixed to account for scrolling
+            clone.style.top = '50%';
+            clone.style.left = '50%';
+            // Calculate scale to fit viewport but be large
+             const scaleX = window.innerWidth * 0.8 / image.naturalWidth;
+             const scaleY = window.innerHeight * 0.8 / image.naturalHeight;
+             const scale = Math.min(scaleX, scaleY, 4); // Max 4x scale, fit within 80% viewport
+
+            clone.style.transform = `translate(-50%, -50%) scale(${scale})`;
+            clone.style.zIndex = 99999;
             clone.style.objectFit = 'contain';
+             clone.style.backgroundColor = 'rgba(0,0,0,0.7)'; // Optional backdrop
+             clone.style.border = '2px solid white';
+             clone.style.borderRadius = '5px';
+             clone.classList.add('chub-zoomed-image'); // Add class for potential global click listener
 
             document.body.appendChild(clone);
 
-            // Prevent this click event from reaching the document's click listener
+             // Add listener to remove clone on next click *anywhere* except the clone itself
+             // Use setTimeout to avoid capturing the same click that opened it
+             setTimeout(() => {
+                document.addEventListener('click', removeZoomedImageOnClick, { once: true, capture: true });
+             }, 0);
+
+
+            // Prevent this image click from immediately triggering the document listener
             event.stopPropagation();
         }
-    });
-
-    // Add event listener to remove the clone on next click anywhere
-    document.addEventListener('click', function handler() {
-        if (clone) {
-            document.body.removeChild(clone);
-            clone = null;
+         // Download button listener
+        else if (event.target.classList.contains('chub-download-btn')) {
+            event.stopPropagation(); // Prevent triggering other listeners
+            const fullPath = event.target.getAttribute('data-path');
+            if (fullPath) {
+                 downloadCharacter(fullPath);
+             } else {
+                 console.error("Download button missing data-path attribute");
+                 toastr.warning("Could not initiate download: character path missing.");
+             }
         }
     });
 
+     // Function to remove the zoomed image
+     function removeZoomedImageOnClick(event) {
+         if (clone && document.body.contains(clone)) {
+             // Only remove if the click was outside the zoomed image itself
+             if (!clone.contains(event.target)) {
+                 document.body.removeChild(clone);
+                 clone = null;
+                  // Clean up listener just in case (though {once: true} should handle it)
+                  document.removeEventListener('click', removeZoomedImageOnClick, { capture: true });
+             } else {
+                  // If clicked inside, re-attach listener for the *next* click
+                  document.addEventListener('click', removeZoomedImageOnClick, { once: true, capture: true });
+             }
+         }
+     }
 
-    characterListContainer.addEventListener('click', async function (event) {
-        if (event.target.classList.contains('download-btn')) {
-            downloadCharacter(event.target.getAttribute('data-path'));
-        }
-    });
 
-    const executeCharacterSearchDebounced = debounce((options) => executeCharacterSearch(options), 750);
+    const executeCharacterSearchDebounced = debounce((options) => executeCharacterSearch(options), 600); // Slightly shorter debounce
 
-    // Combine the 'keydown' and 'click' event listeners for search functionality, debounce the inputs
+    // --- Event Listeners for Search Inputs ---
+    const searchInputs = [
+        'characterSearchInput', 'nameLikeInput', 'includeTags', 'excludeTags',
+        'minTokensInput', 'maxTokensInput', 'minTagsInput', 'minUsersChattedInput', 'maxDaysAgoInput', 'minAiRatingInput', 'languageInput',
+        'nsfwCheckbox', 'nsflCheckbox', 'nsfwOnlyCheckbox', 'requireImagesCheckbox',
+        'requireExampleDialoguesCheckbox', 'requireAltGreetingsCheckbox', 'requireCustomPromptCheckbox',
+        'requireExpressionsCheckbox', 'requireLoreCheckbox', 'requireLoreEmbeddedCheckbox',
+        'requireLoreLinkedCheckbox', 'recommendedVerifiedCheckbox', 'inclusiveOrCheckbox', 'includeForksCheckbox',
+        'sortOrder', 'sortAscCheckbox', 'resultsPerPage', 'pageNumber'
+    ];
+
+    const searchButton = document.getElementById('characterSearchButton');
+    const pageUpButton = document.getElementById('pageUpButton');
+    const pageDownButton = document.getElementById('pageDownButton');
+
     const handleSearch = async function (e) {
-        console.log('handleSearch', e);
-        if (e.type === 'keydown' && e.key !== 'Enter' && e.target.id !== 'includeTags' && e.target.id !== 'excludeTags') {
-            return;
+        console.debug('handleSearch triggered by:', e.target.id || e.type);
+
+         // Prevent triggering search on every keypress in text fields unless Enter
+         if (e.type === 'keyup' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+             return;
+         }
+         // Or if it's keydown that isn't Enter for text inputs
+         if (e.type === 'keydown' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+              return;
+          }
+
+
+        const getVal = (id) => document.getElementById(id)?.value;
+        const getChecked = (id) => document.getElementById(id)?.checked;
+        const getInt = (id) => {
+            const val = getVal(id);
+            return val ? parseInt(val, 10) : null; // Return null if empty or invalid
+        };
+        const splitAndTrim = (id) => {
+             const str = getVal(id);
+             if (!str) return [];
+             return str.split(',').map(tag => tag.trim()).filter(tag => tag); // Filter empty strings
+         };
+
+        let currentPage = getInt('pageNumber') || 1; // Default to 1 if invalid
+
+        // Handle page button clicks
+        if (e.target.id === 'pageUpButton' || e.target.closest('#pageUpButton')) {
+            currentPage++;
+        } else if (e.target.id === 'pageDownButton' || e.target.closest('#pageDownButton')) {
+            currentPage--;
         }
 
-        const splitAndTrim = (str) => {
-            str = str.trim(); // Trim the entire string first
-            if (!str.includes(',')) {
-                return [str];
-            }
-            return str.split(',').map(tag => tag.trim());
+        // Clamp page number
+        currentPage = clamp(currentPage, 1, Number.MAX_SAFE_INTEGER);
+        if (document.getElementById('pageNumber')) {
+             document.getElementById('pageNumber').value = currentPage; // Update input field
+        }
+
+
+        // Gather all options
+        const options = {
+            searchTerm: getVal('characterSearchInput'),
+            name_like: getVal('nameLikeInput'),
+            includeTags: splitAndTrim('includeTags'),
+            excludeTags: splitAndTrim('excludeTags'),
+            min_tokens: getInt('minTokensInput'),
+            max_tokens: getInt('maxTokensInput'),
+            min_tags: getInt('minTagsInput'),
+            min_users_chatted: getInt('minUsersChattedInput'),
+            max_days_ago: getInt('maxDaysAgoInput'),
+            min_ai_rating: getInt('minAiRatingInput'),
+            language: getVal('languageInput'),
+
+            nsfw: getChecked('nsfwCheckbox'),
+            nsfl: getChecked('nsflCheckbox'),
+            nsfw_only: getChecked('nsfwOnlyCheckbox'),
+            require_images: getChecked('requireImagesCheckbox'),
+            require_example_dialogues: getChecked('requireExampleDialoguesCheckbox'),
+            require_alternate_greetings: getChecked('requireAltGreetingsCheckbox'),
+            require_custom_prompt: getChecked('requireCustomPromptCheckbox'),
+            require_expressions: getChecked('requireExpressionsCheckbox'),
+            require_lore: getChecked('requireLoreCheckbox'),
+            require_lore_embedded: getChecked('requireLoreEmbeddedCheckbox'),
+            require_lore_linked: getChecked('requireLoreLinkedCheckbox'),
+            recommended_verified: getChecked('recommendedVerifiedCheckbox'),
+            inclusive_or: getChecked('inclusiveOrCheckbox'),
+             include_forks: getChecked('includeForksCheckbox'), // Make sure this ID exists
+
+            sort: getVal('sortOrder'),
+            asc: getChecked('sortAscCheckbox'),
+            first: getInt('resultsPerPage'), // Use 'first' for API
+            page: currentPage
         };
 
-        console.log(document.getElementById('includeTags').value);
-
-        const searchTerm = document.getElementById('characterSearchInput').value;
-        const includeTags = splitAndTrim(document.getElementById('includeTags').value);
-        const excludeTags = splitAndTrim(document.getElementById('excludeTags').value);
-        const nsfw = document.getElementById('nsfwCheckbox').checked;
-        const sort = document.getElementById('sortOrder').value;
-        let page = document.getElementById('pageNumber').value;
-
-        // If the page number is not being changed, use page 1
-        if (e.target.id !== 'pageNumber' && e.target.id !== 'pageUpButton' && e.target.id !== 'pageDownButton') {
-            // this is frustrating
-            
-            // page = 1;
-            // set page box to 1
-            // document.getElementById('pageNumber').value = 1;
+        // Reset page to 1 if the trigger was not a pagination control
+        if (e.target.id !== 'pageNumber' && e.target.id !== 'pageUpButton' && e.target.id !== 'pageDownButton' && !e.target.closest('#pageUpButton') && !e.target.closest('#pageDownButton')) {
+             options.page = 1;
+             if (document.getElementById('pageNumber')) {
+                  document.getElementById('pageNumber').value = 1;
+             }
         }
 
-        // if page below 0, set to 1
-        if (page < 1) {
-            page = 1;
-            document.getElementById('pageNumber').value = 1;
+
+        executeCharacterSearchDebounced(options);
+
+         // Update settings in real-time for boolean flags and resultsPerPage
+        if (document.getElementById('resultsPerPage') && options.first) {
+             extension_settings.chub.findCount = options.first;
         }
-        
-        executeCharacterSearchDebounced({
-            searchTerm,
-            includeTags,
-            excludeTags,
-            nsfw,
-            sort,
-            page
-        });
+         // Update boolean settings based on current checkbox state
+         Object.keys(defaultSettings).forEach(key => {
+             if (typeof defaultSettings[key] === 'boolean') {
+                 const checkboxId = `${key}Checkbox`; // Assumes standard ID convention
+                 // Special case for findCount mapped to resultsPerPage
+                 if (key === 'findCount') return;
+
+                  // Construct the ID based on common patterns
+                  let elementId;
+                 if (key === 'nsfw_only') elementId = 'nsfwOnlyCheckbox';
+                 else if (key === 'inclusive_or') elementId = 'inclusiveOrCheckbox';
+                 else if (key === 'recommended_verified') elementId = 'recommendedVerifiedCheckbox';
+                 // ... add other non-standard IDs if necessary
+                 else {
+                     // Convert snake_case to camelCase for the ID prefix
+                      const camelCaseKey = key.replace(/_([a-z])/g, g => g[1].toUpperCase());
+                      elementId = `${camelCaseKey}Checkbox`;
+                 }
+
+
+                 const checkbox = document.getElementById(elementId);
+                 if (checkbox) {
+                      extension_settings.chub[key] = checkbox.checked;
+                 }
+             }
+         });
     };
 
-    // debounce the inputs
-    document.getElementById('characterSearchInput').addEventListener('change', handleSearch);
-    document.getElementById('characterSearchButton').addEventListener('click', handleSearch);
-    document.getElementById('includeTags').addEventListener('keyup', handleSearch);
-    document.getElementById('excludeTags').addEventListener('keyup', handleSearch);
-    document.getElementById('sortOrder').addEventListener('change', handleSearch);
-    document.getElementById('nsfwCheckbox').addEventListener('change', handleSearch);
 
-    // when the page number is finished being changed, search again
-    document.getElementById('pageNumber').addEventListener('change', handleSearch);
-    // on page up or down, update the page number, don't go below 1
-    document.getElementById('pageUpButton').addEventListener('click', function (e) {
-        let pageNumber = document.getElementById('pageNumber'); 
+    // Add listeners to all relevant inputs
+    searchInputs.forEach(inputId => {
+        const element = document.getElementById(inputId);
+        if (element) {
+            const eventType = (element.type === 'checkbox' || element.tagName === 'SELECT') ? 'change' : 'keyup';
+            element.addEventListener(eventType, handleSearch);
+             // Also trigger search on 'change' for number inputs when they lose focus or value is committed
+             if (element.type === 'number') {
+                 element.addEventListener('change', handleSearch);
+             }
+             // Trigger search on Enter key for text inputs specifically
+             if (element.type === 'text') {
+                 element.addEventListener('keydown', (e) => {
+                     if (e.key === 'Enter') {
+                         handleSearch(e); // Trigger immediate search on Enter
+                     }
+                 });
+             }
+        } else {
+            console.warn(`Element with ID ${inputId} not found for event listener.`);
+        }
+    });
 
-        pageNumber.value = clamp(parseInt(pageNumber.value) + 1, 0, Number.MAX_SAFE_INTEGER);
-        //pageNumber.value = Math.max(1, pageNumber.value);
-        
-        handleSearch(e);
-    }
-    );
-    document.getElementById('pageDownButton').addEventListener('click', function (e) {
-        let pageNumber = document.getElementById('pageNumber');
-        pageNumber.value = clamp(parseInt(pageNumber.value) - 1, 0, Number.MAX_SAFE_INTEGER);
-        //pageNumber.value = Math.max(1, pageNumber.value);
-        
-        handleSearch(e);
-    }
-    );
+    // Add listeners for buttons
+    if (searchButton) searchButton.addEventListener('click', handleSearch);
+    if (pageUpButton) pageUpButton.addEventListener('click', handleSearch);
+    if (pageDownButton) pageDownButton.addEventListener('click', handleSearch);
+
+    // Trigger initial search if desired (optional)
+    // handleSearch({ target: { id: 'initial-load' } }); // Uncomment to search on open
 }
 
+
 /**
- * Fetches a character by making an API call.
- * 
- * This function sends a POST request to the API_ENDPOINT_DOWNLOAD with a provided character's fullPath. 
- * It requests the character in the "tavern" format and the "main" version. Once the data is fetched, it 
- * is converted to a blob before being returned.
- * 
+ * Fetches a character *avatar image* by making an API call.
+ * Note: This is less efficient than getting the avatar URL from the search results.
+ * Kept here for reference or if direct avatar fetch is needed for some reason.
+ *
  * @async
  * @function
- * @param {string} fullPath - The unique path/reference for the character to be fetched.
- * @returns {Promise<Blob>} - Resolves with a Blob of the fetched character data.
+ * @param {string} fullPath - The unique path/reference for the character.
+ * @returns {Promise<Blob|null>} - Resolves with a Blob of the avatar image or null on failure.
  */
-async function getCharacter(fullPath) {
-    let response = await fetch(
-        API_ENDPOINT_DOWNLOAD,
-        {
-            method: "POST",
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                fullPath: fullPath,
-                format: "tavern",
-                version: "main"
-            }),
-        }
-    );
+async function getCharacterAvatar(fullPath) {
+    // Prefer the dedicated avatar endpoint if it exists and works
+     const avatarUrl = `https://avatars.charhub.io/avatars/${fullPath}/avatar.webp`;
+     try {
+         let response = await fetch(avatarUrl, { method: "GET" });
 
-    // If the request failed, try a backup endpoint - https://avatars.charhub.io/{fullPath}/avatar.webp
-    if (!response.ok) {
-        console.log(`Request failed for ${fullPath}, trying backup endpoint`);
-        response = await fetch(
-            `https://avatars.charhub.io/avatars/${fullPath}/avatar.webp`,
-            {
-                method: "GET",
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-            }
-        );
-    }
-    let data = await response.blob();
-    return data;
+         if (!response.ok) {
+             console.log(`Primary avatar request failed for ${fullPath} (${response.status}), trying download endpoint as fallback for image.`);
+              // Fallback: Use the download endpoint - less ideal as it downloads the whole card
+              response = await fetch(
+                  API_ENDPOINT_DOWNLOAD,
+                  {
+                      method: "POST",
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ fullPath: fullPath, format: "tavern", version: "main" }), // Or format specifically for image? Check API
+                  }
+              );
+         }
+
+         if (!response.ok) {
+             console.error(`Failed to fetch avatar for ${fullPath} from both endpoints.`);
+             return null; // Return null if fetch fails completely
+         }
+
+         // Check content type to ensure it's an image
+         const contentType = response.headers.get('content-type');
+         if (contentType && contentType.startsWith('image/')) {
+            const data = await response.blob();
+            return data;
+         } else {
+             console.warn(`Received non-image content type (${contentType}) when fetching avatar for ${fullPath}.`);
+             // If using the download endpoint as fallback, this might be JSON/Tavern card data.
+             // In a real scenario, you'd parse this and extract the image data if possible,
+             // but for simplicity here, we return null if it's not directly an image.
+             return null;
+         }
+
+     } catch (error) {
+         console.error(`Error fetching avatar for ${fullPath}:`, error);
+         return null; // Return null on network or other errors
+     }
 }
 
 /**
  * jQuery document-ready block:
- * - Fetches the HTML settings for an extension from a known endpoint and prepares a button for character search.
- * - The button, when clicked, triggers the `openSearchPopup` function.
- * - Finally, it loads any previously saved settings related to this extension.
+ * - Adds the Chub search button to the UI.
+ * - Attaches the click handler to open the search popup.
+ * - Loads extension settings.
  */
 jQuery(async () => {
-    // put our button in between external_import_button and rm_button_group_chats in the form_character_search_form
-    // on hover, should say "Search CHub for characters"
-    $("#external_import_button").after('<button id="search-chub" class="menu_button fa-solid fa-cloud-bolt faSmallFontSquareFix" title="Search CHub for characters"></button>');
+    // Add button
+    $("#external_import_button").after('<button id="search-chub" class="menu_button fa-solid fa-cloud-bolt faSmallFontSquareFix" title="Search Chub Characters (Work-SillyTavern-Chub-Search)"></button>');
+
+    // Add click listener
     $("#search-chub").on("click", function () {
         openSearchPopup();
     });
 
-    loadSettings();
+    // Load settings
+    await loadSettings(); // Ensure settings are loaded before the popup might be opened
+
+     // Add some basic CSS for layout if not done elsewhere
+     const css = `
+        .chub-wrapper { display: flex; flex-direction: column; height: 100%; max-height: 70vh; }
+        .chub-list-popup { flex-grow: 1; overflow-y: auto; border: 1px solid var(--border-color); padding: 5px; margin-bottom: 10px; background: var(--background-color); min-height: 150px; }
+        .chub-search-container { padding: 10px; border: 1px solid var(--border-color); overflow-y: auto; max-height: 40%; background: var(--settings-bg); }
+        .chub-search-row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
+        .chub-search-row label { min-width: 80px; text-align: right; }
+        .chub-details { border: 1px solid var(--border-color); margin-bottom: 10px; border-radius: 4px; }
+        .chub-summary { cursor: pointer; padding: 5px; background-color: var(--menu-button-bg); font-weight: bold; }
+        .chub-filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; padding: 10px; background-color: var(--settings-bg-hover); }
+        .chub-filter-item { background-color: transparent; } /* Override potential inherited styles */
+        .chub-filter-item label { min-width: fit-content; margin-right: 5px; }
+        .chub-character-item { display: flex; border-bottom: 1px solid var(--border-color); padding: 8px 5px; gap: 10px; background-color: var(--message-bot-bg); margin-bottom: 5px; border-radius: 3px; }
+        .chub-character-item:hover { background-color: var(--message-bot-bg-hover); }
+        .chub-thumbnail { width: 60px; height: 80px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+        .chub-info { flex-grow: 1; display: flex; flex-direction: column; gap: 3px; }
+        .chub-name { font-weight: bold; color: var(--text-color-primary); }
+        .chub-author { font-size: 0.85em; color: var(--text-color-secondary); }
+        .chub-description { font-size: 0.9em; max-height: 3.6em; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--text-color-primary); }
+        .chub-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+        .chub-tag { background-color: var(--menu-button-bg); padding: 2px 5px; border-radius: 3px; font-size: 0.8em; }
+        .chub-download-btn { align-self: center; margin-left: 10px; }
+        .chub-no-characters-found { text-align: center; padding: 20px; color: var(--text-color-secondary); }
+        .chub-search-button { margin-top: 10px; width: 100%; text-align: center; padding: 8px; }
+        .list-and-search-wrapper .searching { opacity: 0.6; cursor: wait; pointer-events: none; }
+        .chub-zoomed-image { cursor: zoom-out; } /* Indicate the zoomed image can be clicked to close */
+        .wide100pMinFit { min-width: 100px; flex-grow: 1;} /* Util class for number inputs */
+        .textarea_compact.wide8pMinFit { width: 8ch; min-width: fit-content;} /* Adjust specific inputs */
+    `;
+     $('head').append(`<style>${css}</style>`);
 });
+
