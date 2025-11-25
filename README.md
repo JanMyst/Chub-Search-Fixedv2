@@ -1,5 +1,5 @@
-# Working version of SillyTavern Chub Search
-## What new?
+# Working, reworked to enable all blacklisted cards.
+## What new? (old)
 - 30 char cards on one page
 - fix page switching
 - fix cards download (thanks for this, fork "Fixed-SillyTavern-Chub-Search")
